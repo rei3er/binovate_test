@@ -1,0 +1,4 @@
+sqlalchemy
+aiohttp
+pymysql
+cryptography
