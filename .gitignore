@@ -1,0 +1,3 @@
+server/src/.idea/
+server/src/lib/__pycache__/
+server/src/lib/db/__pycache__/
