@@ -32,21 +32,20 @@ class P2PMessage(_Base):
     target_user_id = Column(Integer, ForeignKey(User.id))
 
 
-class GroupChatMessage(_Base):
-    __tablename__ = "GroupChatMessage"
-
-    id = Column(Integer, primary_key=True)
-    message = Column(Text())
-    origin_user_id = Column(Integer, ForeignKey(User.id))
-    group_chat_id = Column(Integer, ForeignKey(GroupChat.id))
-
-
 class GroupChatMembers(_Base):
     __tablename__ = "GroupChatMembers"
 
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey(User.id))
     group_chat_id = Column(Integer, ForeignKey(GroupChat.id))
+
+
+class GroupChatMessage(_Base):
+    __tablename__ = "GroupChatMessage"
+
+    id = Column(Integer, primary_key=True)
+    message = Column(Text())
+    group_chat_member_id = Column(Integer, ForeignKey(GroupChatMembers.id))
 
 
 def create_all(engine: sqla_engine.Engine) -> None:

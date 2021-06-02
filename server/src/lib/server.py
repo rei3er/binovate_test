@@ -1,6 +1,9 @@
+import json
 import contextlib
 import aiohttp.web as aw
-from typing import Mapping, Any, Sequence
+from typing import Mapping, Any, Sequence, Optional, Union
+import sqlalchemy
+import sqlalchemy.exc
 from .db import dao
 from .db import orm
 
@@ -40,6 +43,8 @@ class Server:
 
     def _init_routes(self) -> None:
         self._app.router.add_get("/v1/messages", self._req_h_get_messages)
+        self._app.router.add_post("/v1/messages", self._req_h_post_messages)
+        self._app.router.add_post("/v1/group_chat", self._req_h_post_group_chat)
 
     async def _get_messages(self, uid: int, is_group: bool) -> Sequence[str]:
         def request(session):
@@ -53,6 +58,112 @@ class Server:
 
         return await self._dao.access(request)
 
+    async def _post_messages(self,
+                             message: str,
+                             user_id: int,
+                             target_id: int,
+                             target_is_group_chat: bool) -> bool:
+        def request(session):
+            # for simplicity just return flag whether message was posted or not with
+            # no additional information
+            msg = None
+            res = False
+            if target_is_group_chat:
+                member = session.query(orm.GroupChatMembers).filter(
+                            sqlalchemy.and_(orm.GroupChatMembers.user_id == user_id,
+                                            orm.GroupChatMembers.group_chat_id == target_id)).first()
+                if member is None:
+                    pass
+                else:
+                    msg = orm.GroupChatMessage(message=message,
+                                               group_chat_member_id=member.id)
+            else:
+                msg = orm.P2PMessage(message=message,
+                                     origin_user_id=user_id,
+                                     target_user_id=target_id)
+            if msg is not None:
+                session.add(msg)
+
+                try:
+                    session.commit()
+                except sqlalchemy.exc.IntegrityError:
+                    pass
+                else:
+                    res = True
+
+            return res
+
+        return await self._dao.access(request)
+
+    @staticmethod
+    async def _get_request_body(request: aw.Request, body_is_json: bool = True) -> Union[str, Mapping[str, Any]]:
+        if not request.body_exists:
+            raise aw.HTTPBadRequest(text="No body")
+        body = await request.text()
+        try:
+            data = json.loads(body) if body_is_json else body
+        except ValueError:
+            raise aw.HTTPBadRequest(text="Bad body: " + body)
+        return data
+
+    async def _req_h_post_group_chat(self, request: aw.Request) -> aw.Response:
+        """
+        Processes POST request to /v1/group_chat.
+
+        JSON body format:
+        {
+            "name": <str>
+        }
+
+        JSON response format:
+        {
+            "status": <bool>,
+            "group_chat_id": <int>
+        }
+
+        "group_char_id" will be missing if "status" is false.
+
+        :param request: Received request.
+        :return: JSON response with status and data.
+        :raises:
+            aw.HTTPBadRequest: If something is wong with the request.
+        """
+
+        data = await self._get_request_body(request)
+        # for simplicity let's assume data is valid
+        
+
+    async def _req_h_post_messages(self, request: aw.Request) -> aw.Response:
+        """
+        Processes POST request to /v1/messages.
+
+        JSON body format:
+        {
+            "originUserId": <int>,
+            "targetId": <int>,
+            "targetIsGroupChat": <bool>,
+            "message": <str>
+        }
+
+        JSON response format:
+        {
+            "status": <bool>
+        }
+
+        :param request: Received request.
+        :return: JSON response with status.
+        :raises:
+            aw.HTTPBadRequest: If something is wong with the request.
+        """
+
+        data = await self._get_request_body(request)
+        # for simplicity let's assume data is valid
+        post = await self._post_messages(data["message"],
+                                         data["originUserId"],
+                                         data["targetId"],
+                                         data["targetIsGroupChat"])
+        return aw.json_response({"status": post})
+
     async def _req_h_get_messages(self, request: aw.Request) -> aw.Response:
         """
         Processes GET request to /v1/messages. For simlicity let's assume
@@ -63,6 +174,8 @@ class Server:
 
         :param request: Received request.
         :return: JSON response with the list of messages.
+        :raises:
+            aw.HTTPBadRequest: If something is wong with the request.
         """
 
         req_id = request.query.get("id")
