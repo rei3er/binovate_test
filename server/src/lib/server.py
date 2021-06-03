@@ -1,14 +1,17 @@
 import json
 import contextlib
 import aiohttp.web as aw
-from typing import Mapping, Any, Sequence, Optional, Union
+from typing import Mapping, Any, Sequence, Optional, Union, Tuple
 import sqlalchemy
+import sqlalchemy.orm as sqla_orm
 import sqlalchemy.exc
 from .db import dao
 from .db import orm
 
 
 class Server:
+    CommonResponseType = Tuple[bool, Union[str, Any]]
+
     def __init__(self, cfg: Mapping[str, Any]) -> None:
         """
         Initializes server object.
@@ -45,55 +48,157 @@ class Server:
         self._app.router.add_get("/v1/messages", self._req_h_get_messages)
         self._app.router.add_post("/v1/messages", self._req_h_post_messages)
         self._app.router.add_post("/v1/group_chat", self._req_h_post_group_chat)
+        self._app.router.add_post("/v1/group_chat/{id:[1-9]\\d*}/participants", self._req_h_post_add_to_group_chat)
+        self._app.router.add_delete("/v1/group_chat/{gid:[1-9]\\d*}/participants/{uid:[1-9]\\d*}",
+                                    self._req_h_post_del_from_group_chat)
 
-    async def _get_messages(self, uid: int, is_group: bool) -> Sequence[str]:
-        def request(session):
-            if is_group:
-                cls = orm.GroupChatMessage
-                cond = cls.id == uid
+    @staticmethod
+    def _construct_common_response(status: bool, data: Any, error: str) -> CommonResponseType:
+        return status, data if status else error
+
+    async def _get_messages(self, uid: int, is_group: bool) -> CommonResponseType:
+        def do(session: sqla_orm.Session) -> Optional[Sequence[str]]:
+            cls, cond = (orm.User, orm.User.id == uid) if not is_group else (orm.GroupChat, orm.GroupChat.id == uid)
+            obj = session.query(cls).filter(cond).first()
+            if obj is not None:
+                if not is_group:
+                    res = session.query(orm.P2PMessage.message).filter(orm.P2PMessage.origin_user_id == uid).all()
+                else:
+                    res = session.query(orm.GroupChatMessage.message).join(orm.GroupChatMembers).filter(
+                        orm.GroupChatMembers.group_chat_id == uid
+                    ).all()
+                res = tuple(t[0] for t in res)
             else:
-                cls = orm.P2PMessage
-                cond = cls.origin_user_id == uid
-            return [msg.message for msg in session.query(cls).filter(cond).all()]
+                res = None
+            return res
 
-        return await self._dao.access(request)
+        messages = await self._dao.access(do)
+        return self._construct_common_response(messages is not None, messages,
+                                               "Identifier " + str(uid) + " does not exist")
 
     async def _post_messages(self,
                              message: str,
                              user_id: int,
                              target_id: int,
-                             target_is_group_chat: bool) -> bool:
-        def request(session):
-            # for simplicity just return flag whether message was posted or not with
-            # no additional information
-            msg = None
-            res = False
-            if target_is_group_chat:
-                member = session.query(orm.GroupChatMembers).filter(
-                            sqlalchemy.and_(orm.GroupChatMembers.user_id == user_id,
-                                            orm.GroupChatMembers.group_chat_id == target_id)).first()
-                if member is None:
-                    pass
+                             target_is_group_chat: bool) -> CommonResponseType:
+        def do(session: sqla_orm.Session) -> Optional[str]:
+            res, msg, invalid_id = None, None, None
+            user = session.query(orm.User).filter(orm.User.id == user_id).first()
+            if user is not None:
+                if not target_is_group_chat:
+                    target_user = session.query(orm.User).filter(orm.User.id == target_id).first()
+                    if target_user is not None:
+                        msg = orm.P2PMessage(message=message,
+                                             origin_user_id=user_id,
+                                             target_user_id=target_id)
+                    else:
+                        invalid_id = target_id
                 else:
-                    msg = orm.GroupChatMessage(message=message,
-                                               group_chat_member_id=member.id)
+                    chat = session.query(orm.GroupChat).filter(orm.GroupChat.id == target_id).first()
+                    if chat is not None:
+                        member = session.query(orm.GroupChatMembers).filter(sqlalchemy.and_(
+                            orm.GroupChatMembers.user_id == user_id,
+                            orm.GroupChatMembers.group_chat_id == target_id
+                        )).first()
+                        if member is not None:
+                            msg = orm.GroupChatMessage(message=message,
+                                                       group_chat_member_id=member.id)
+                        else:
+                            res = "User " + str(user_id) + " is not a member of chat " + str(target_id)
+                    else:
+                        invalid_id = target_id
             else:
-                msg = orm.P2PMessage(message=message,
-                                     origin_user_id=user_id,
-                                     target_user_id=target_id)
+                invalid_id = user_id
+
             if msg is not None:
                 session.add(msg)
-
-                try:
-                    session.commit()
-                except sqlalchemy.exc.IntegrityError:
-                    pass
-                else:
-                    res = True
+                session.commit()
+            elif res:
+                pass
+            else:
+                res = "Identifier " + str(invalid_id) + " does not exist"
 
             return res
 
-        return await self._dao.access(request)
+        error = await self._dao.access(do)
+        return self._construct_common_response(error is None, None, error)
+
+    async def _create_group_char(self, name: str) -> CommonResponseType:
+        def do(session: sqla_orm.Session) -> int:
+            chat = orm.GroupChat(name=name)
+            session.add(chat)
+            session.commit()
+            return chat.id
+
+        res = await self._dao.access(do)
+        return self._construct_common_response(True, res, None)
+
+    async def _add_to_group_chat(self, group_chat_id: int, users: Sequence[int], all_or_nothing: bool = False) -> \
+            CommonResponseType:
+        def do(session: sqla_orm.Session) -> Union[str, Sequence[int]]:
+            chat = session.query(orm.GroupChat).filter(orm.GroupChat.id == group_chat_id).first()
+            if chat is not None:
+                all_users = set(t[0] for t in session.query(orm.User.id).all())
+                add_users = set(users)
+                unknown_users = add_users - all_users
+                if unknown_users and all_or_nothing:
+                    res = "Unknown identifiers [" + ",".join(map(str, unknown_users)) + "]"
+                else:
+                    add_users = add_users - unknown_users
+                    ex_users = set(t[0] for t in session.query(orm.User.id).join(orm.GroupChatMembers).filter(
+                        sqlalchemy.and_(
+                            orm.User.id.in_(add_users),
+                            orm.GroupChatMembers.group_chat_id == group_chat_id
+                        )
+                    ).all())
+                    if ex_users and all_or_nothing:
+                        res = "Users [" + ",".join(map(str, ex_users)) + "] are in chat " + str(group_chat_id)
+                    else:
+                        add_users = add_users - ex_users
+                        for user_id in add_users:
+                            session.add(orm.GroupChatMembers(user_id=user_id,
+                                                             group_chat_id=group_chat_id))
+                        session.commit()
+                        res = tuple(add_users)
+            else:
+                res = "Unknown identifier " + str(group_chat_id)
+            return res
+
+        error_or_res = await self._dao.access(do)
+        return self._construct_common_response(type(error_or_res) is not str, error_or_res, error_or_res)
+
+    async def _del_from_group_chat(self, group_chat_id: int, user_id: int) -> CommonResponseType:
+        def do(session: sqla_orm.Session) -> Optional[str]:
+            res = None
+            chat = session.query(orm.GroupChat).filter(orm.GroupChat.id == group_chat_id).first()
+            if chat is not None:
+                user = session.query(orm.User).filter(orm.User.id == user_id).first()
+                if user is not None:
+                    member = session.query(orm.GroupChatMembers).filter(sqlalchemy.and_(
+                        orm.GroupChatMembers.group_chat_id == group_chat_id,
+                        orm.GroupChatMembers.user_id == user_id
+                    )).first()
+                    if member is not None:
+                        session.delete(member)
+                        session.commit()
+                    else:
+                        res = "User " + str(user_id) + " is not a member of chat " + str(group_chat_id)
+                else:
+                    res = "Unknown identifier " + str(user_id)
+            else:
+                res = "Unknown identifier " + str(group_chat_id)
+            return res
+
+        error = await self._dao.access(do)
+        return self._construct_common_response(error is None, None, error)
+
+
+    @staticmethod
+    def _response4common(res: CommonResponseType) -> aw.Response:
+        return aw.json_response({
+            "status": res[0],
+            "data" if res[0] else "error": res[1]
+        })
 
     @staticmethod
     async def _get_request_body(request: aw.Request, body_is_json: bool = True) -> Union[str, Mapping[str, Any]]:
@@ -106,63 +211,124 @@ class Server:
             raise aw.HTTPBadRequest(text="Bad body: " + body)
         return data
 
+    async def _req_h_post_del_from_group_chat(self, request: aw.Request) -> aw.Response:
+        """
+        Processes DELETE request to /v1/group_chat/<gid>/participants/<uid>.
+
+        Response format:
+
+            {
+                "status": <bool>,
+                "data" or "error": null or <str>
+            }
+
+        :param request: Received request.
+        :return: JSON response with status and data or an error.
+        :raises:
+            aw.HTTPBadRequest: If something is wong with the request.
+        """
+        group_chat_id = int(request.match_info.get("gid"))
+        user_id = int(request.match_info.get("uid"))
+        res = await self._del_from_group_chat(group_chat_id, user_id)
+
+        return self._response4common(res)
+
+
+    async def _req_h_post_add_to_group_chat(self, request: aw.Request) -> aw.Response:
+        """
+        Processes POST request to /v1/group_chat/<id>/participants.
+
+        Request body format:
+
+            {
+                "userId: [<int>],
+                "allOrNothing": <bool>
+            }
+
+        Response format:
+
+            {
+                "status": <bool>,
+                "data" or "error": null or <str>
+            }
+
+        :param request: Received request.
+        :return: JSON response with status and data or an error.
+        :raises:
+            aw.HTTPBadRequest: If something is wong with the request.
+        """
+        data = await self._get_request_body(request)
+        group_chat_id = int(request.match_info.get("id"))
+        # for simplicity let's assume data is valid
+        res = await self._add_to_group_chat(group_chat_id,
+                                            data["userId"],
+                                            data["allOrNothing"])
+
+        return self._response4common(res)
+
     async def _req_h_post_group_chat(self, request: aw.Request) -> aw.Response:
         """
         Processes POST request to /v1/group_chat.
 
-        JSON body format:
-        {
-            "name": <str>
-        }
+        Request body format:
 
-        JSON response format:
-        {
-            "status": <bool>,
-            "group_chat_id": <int>
-        }
+            {
+                "name": <str>
+            }
 
-        "group_char_id" will be missing if "status" is false.
+        Response format:
+
+            {
+                "status": <bool>,
+                "data" or "error": <int> or <str>
+            }
 
         :param request: Received request.
-        :return: JSON response with status and data.
+        :return: JSON response with status and data or an error.
         :raises:
             aw.HTTPBadRequest: If something is wong with the request.
         """
 
         data = await self._get_request_body(request)
         # for simplicity let's assume data is valid
-        
+        res = await self._create_group_char(data["name"])
+
+        return self._response4common(res)
+
 
     async def _req_h_post_messages(self, request: aw.Request) -> aw.Response:
         """
         Processes POST request to /v1/messages.
 
-        JSON body format:
-        {
-            "originUserId": <int>,
-            "targetId": <int>,
-            "targetIsGroupChat": <bool>,
-            "message": <str>
-        }
+        Request body format:
 
-        JSON response format:
-        {
-            "status": <bool>
-        }
+            {
+                "originUserId": <int>,
+                "targetId": <int>,
+                "targetIsGroupChat": <bool>,
+                "message": <str>
+            }
+
+        Response format:
+
+             {
+                "status": <bool>,
+                "data" or "error": null or <str>
+             }
 
         :param request: Received request.
-        :return: JSON response with status.
+        :return: JSON response with status and data or an error.
         :raises:
             aw.HTTPBadRequest: If something is wong with the request.
         """
 
         data = await self._get_request_body(request)
         # for simplicity let's assume data is valid
-        post = await self._post_messages(data["message"],
-                                         data["originUserId"],
-                                         data["targetId"],
-                                         data["targetIsGroupChat"])
-        return aw.json_response({"status": post})
+        res = await self._post_messages(data["message"],
+                                        data["originUserId"],
+                                        data["targetId"],
+                                        data["targetIsGroupChat"])
+        return self._response4common(res)
 
     async def _req_h_get_messages(self, request: aw.Request) -> aw.Response:
         """
@@ -170,10 +336,19 @@ class Server:
         the maximum number of messages in the DB is not to big to return
         them in a single JSON.
 
-        Query format: ...?id=<user or group char id>[&group=<0 or 1>]
+        Request query format:
+
+            ...?id=<user or group chat id>[&group=<0 or 1>]
+
+        Response format:
+
+            {
+                "status": <bool>,
+                "data" or "error": [<str>] or <str>
+            }
 
         :param request: Received request.
-        :return: JSON response with the list of messages.
+        :return: JSON response with status and data or an error.
         :raises:
             aw.HTTPBadRequest: If something is wong with the request.
         """
@@ -191,9 +366,9 @@ class Server:
         except ValueError:
             raise aw.HTTPBadRequest(text="Bad 'group': " + req_group)
 
-        messages = await self._get_messages(req_id, req_group)
+        res = await self._get_messages(req_id, req_group)
 
-        return aw.json_response({"messages": messages})
+        return self._response4common(res)
 
     async def start(self) -> bool:
         """

@@ -28,8 +28,8 @@ class P2PMessage(_Base):
 
     id = Column(Integer, primary_key=True)
     message = Column(Text())
-    origin_user_id = Column(Integer, ForeignKey(User.id))
-    target_user_id = Column(Integer, ForeignKey(User.id))
+    origin_user_id = Column(Integer, ForeignKey(User.id, ondelete="CASCADE"))
+    target_user_id = Column(Integer, ForeignKey(User.id, ondelete="CASCADE"))
 
 
 class GroupChatMembers(_Base):
@@ -38,6 +38,7 @@ class GroupChatMembers(_Base):
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey(User.id))
     group_chat_id = Column(Integer, ForeignKey(GroupChat.id))
+    UniqueConstraint(user_id, group_chat_id)
 
 
 class GroupChatMessage(_Base):
@@ -45,7 +46,7 @@ class GroupChatMessage(_Base):
 
     id = Column(Integer, primary_key=True)
     message = Column(Text())
-    group_chat_member_id = Column(Integer, ForeignKey(GroupChatMembers.id))
+    group_chat_member_id = Column(Integer, ForeignKey(GroupChatMembers.id, ondelete="CASCADE"))
 
 
 def create_all(engine: sqla_engine.Engine) -> None:
