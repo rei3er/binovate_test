@@ -1,7 +1,7 @@
 services:
   server:
     build: ./server
-    command: python src/starter.py --host=server --port=12345 --db-name=server_db --db-user-name=server_user --db-user-password=server_password --db-host=db --db-port=3306
+    command: python src/wait_for_db.py --host=db --port=3306 -c 'python src/starter.py --host=server --port=12345 --db-name=server_db --db-user-name=server_user --db-user-password=server_password --db-host=db --db-port=3306'
     ports:
       - '12345:12345'
     depends_on:
@@ -16,3 +16,7 @@ services:
       MYSQL_PASSWORD: 'server_password'
       MYSQL_ROOT_PASSWORD: 'root_password'
     restart: always
+    volumes:
+      - app:/var/lib/mysql
+volumes:
+  app:

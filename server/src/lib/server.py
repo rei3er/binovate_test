@@ -47,6 +47,7 @@ class Server:
     def _init_routes(self) -> None:
         self._app.router.add_get("/v1/messages", self._req_h_get_messages)
         self._app.router.add_post("/v1/messages", self._req_h_post_messages)
+        self._app.router.add_post("/v1/user", self._req_h_post_user)
         self._app.router.add_post("/v1/group_chat", self._req_h_post_group_chat)
         self._app.router.add_post("/v1/group_chat/{id:[1-9]\\d*}/participants", self._req_h_post_add_to_group_chat)
         self._app.router.add_delete("/v1/group_chat/{gid:[1-9]\\d*}/participants/{uid:[1-9]\\d*}",
@@ -126,6 +127,16 @@ class Server:
     async def _create_group_char(self, name: str) -> CommonResponseType:
         def do(session: sqla_orm.Session) -> int:
             chat = orm.GroupChat(name=name)
+            session.add(chat)
+            session.commit()
+            return chat.id
+
+        res = await self._dao.access(do)
+        return self._construct_common_response(True, res, None)
+
+    async def _create_user(self, name: str) -> CommonResponseType:
+        def do(session: sqla_orm.Session) -> int:
+            chat = orm.User(name=name)
             session.add(chat)
             session.commit()
             return chat.id
@@ -263,6 +274,35 @@ class Server:
         res = await self._add_to_group_chat(group_chat_id,
                                             data["userId"],
                                             data["allOrNothing"])
+
+        return self._response4common(res)
+
+    async def _req_h_post_user(self, request: aw.Request) -> aw.Response:
+        """
+        Processes POST request to /v1/user.
+
+        Request body format:
+
+            {
+                "name": <str>
+            }
+
+        Response format:
+
+            {
+                "status": <bool>,
+                "data" or "error": <int> or <str>
+            }
+
+        :param request: Received request.
+        :return: JSON response with status and data or an error.
+        :raises:
+            aw.HTTPBadRequest: If something is wong with the request.
+        """
+
+        data = await self._get_request_body(request)
+        # for simplicity let's assume data is valid
+        res = await self._create_user(data["name"])
 
         return self._response4common(res)
 
