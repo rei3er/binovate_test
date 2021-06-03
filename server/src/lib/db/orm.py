@@ -52,22 +52,8 @@ class GroupChatMessage(_Base):
 def create_all(engine: sqla_engine.Engine) -> None:
     """
     Creates all tables.
+
     :param engine: Engine to use for creation.
     :return: None.
     """
     _Base.metadata.create_all(engine)
-
-
-if __name__ == "__main__":
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-
-    engine = create_engine("mysql+pymysql://mdu:mdu@127.0.0.1:3306/test")
-    session_factory = sessionmaker(bind=engine)
-
-    _Base.metadata.drop_all(engine)
-    _Base.metadata.create_all(engine)
-
-    with session_factory() as session:
-        session.query(User).all()
-

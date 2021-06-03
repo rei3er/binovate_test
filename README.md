@@ -1,5 +1,4 @@
-# binovate_test
-Test project for Binovate
+# Test project for Binovate
 
 Implemented all APIs as it's described in the Messaging Application Challenge.
 Additionally I have added "POST /v1/user" API to add users.

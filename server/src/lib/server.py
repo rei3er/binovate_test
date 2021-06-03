@@ -15,6 +15,7 @@ class Server:
     def __init__(self, cfg: Mapping[str, Any]) -> None:
         """
         Initializes server object.
+
         :param cfg: Configuration data. For simplicity assume it's valid and
                     contains all necessary data.
         """
@@ -32,6 +33,7 @@ class Server:
     def _init_app(self) -> None:
         """
         Creates aiohttp Application object.
+
         :return: None.
         """
         self._app = aw.Application()
@@ -39,12 +41,20 @@ class Server:
     def _init_database_accessor(self) -> None:
         """
         Creates database engine and session factory.
+
         :return: None.
         """
+
         url = self._cfg.get("db.url")
         self._dao = dao.DAO(url)
 
     def _init_routes(self) -> None:
+        """
+        Initializes API endpoints.
+
+        :return: None.
+        """
+
         self._app.router.add_get("/v1/messages", self._req_h_get_messages)
         self._app.router.add_post("/v1/messages", self._req_h_post_messages)
         self._app.router.add_post("/v1/user", self._req_h_post_user)
@@ -55,10 +65,28 @@ class Server:
 
     @staticmethod
     def _construct_common_response(status: bool, data: Any, error: str) -> CommonResponseType:
+        """
+        Constructs CommonResponseType.
+
+        :param status: Status, True or False.
+        :param data: Any data.
+        :param error: Error string for the case when status is False.
+        :return: CommonResponseType object.
+        """
         return status, data if status else error
 
     async def _get_messages(self, uid: int, is_group: bool) -> CommonResponseType:
+        """
+        Gets all messages for the specified user or group chat.
+
+        :param uid: User or group chat id.
+        :param is_group: If True, uid is a group chat id.
+        :return: CommonResponseType object.
+        """
+
         def do(session: sqla_orm.Session) -> Optional[Sequence[str]]:
+            # 1. Check if user or group chat exists.
+            # 2. Query messages.
             cls, cond = (orm.User, orm.User.id == uid) if not is_group else (orm.GroupChat, orm.GroupChat.id == uid)
             obj = session.query(cls).filter(cond).first()
             if obj is not None:
@@ -82,7 +110,25 @@ class Server:
                              user_id: int,
                              target_id: int,
                              target_is_group_chat: bool) -> CommonResponseType:
+        """
+        Posts a message.
+
+        :param message: Message to post.
+        :param user_id: Id of user who posts the message.
+        :param target_id: Id of group chat to post to or id of another user.
+        :param target_is_group_chat: If True, target_id is a group chat id.
+        :return: CommonResponseType object.
+        """
+
         def do(session: sqla_orm.Session) -> Optional[str]:
+            # 1. Check if user exists.
+            # 2. If target_is_group_chat is False:
+            #    - Check if target user exists.
+            #    - Post the message to target user.
+            # 3. If target_is_group_chat is True:
+            #    - Check if target group chat exists.
+            #    - Check if user is a member of this chat.
+            #    - Post the message to target group chat.
             res, msg, invalid_id = None, None, None
             user = session.query(orm.User).filter(orm.User.id == user_id).first()
             if user is not None:
@@ -125,6 +171,13 @@ class Server:
         return self._construct_common_response(error is None, None, error)
 
     async def _create_group_char(self, name: str) -> CommonResponseType:
+        """
+        Creates a new group chat.
+
+        :param name: Group chat name.
+        :return: CommonResponseType object.
+        """
+
         def do(session: sqla_orm.Session) -> int:
             chat = orm.GroupChat(name=name)
             session.add(chat)
@@ -135,6 +188,13 @@ class Server:
         return self._construct_common_response(True, res, None)
 
     async def _create_user(self, name: str) -> CommonResponseType:
+        """
+        Creates a new user.
+
+        :param name: User name.
+        :return: CommonResponseType object.
+        """
+
         def do(session: sqla_orm.Session) -> int:
             chat = orm.User(name=name)
             session.add(chat)
@@ -146,7 +206,20 @@ class Server:
 
     async def _add_to_group_chat(self, group_chat_id: int, users: Sequence[int], all_or_nothing: bool = False) -> \
             CommonResponseType:
+        """
+        Adds users to the group chat.
+
+        :param group_chat_id: Group chat id.
+        :param users: Sequence of user ids.
+        :param all_or_nothing: If True, add all users or don't add at all in case of errors.
+        :return: CommonResponseType object.
+        """
+
         def do(session: sqla_orm.Session) -> Union[str, Sequence[int]]:
+            # 1. Check if group chat exists.
+            # 2. Get list of all users.
+            # 3. Find unknown users and users which are already in the chat.
+            # 4. Add specified users except unknown and that are already in the chat.
             chat = session.query(orm.GroupChat).filter(orm.GroupChat.id == group_chat_id).first()
             if chat is not None:
                 all_users = set(t[0] for t in session.query(orm.User.id).all())
@@ -179,7 +252,19 @@ class Server:
         return self._construct_common_response(type(error_or_res) is not str, error_or_res, error_or_res)
 
     async def _del_from_group_chat(self, group_chat_id: int, user_id: int) -> CommonResponseType:
+        """
+        Deletes user with the specified id from the group chat with the specified id.
+
+        :param group_chat_id: Group chat id.
+        :param user_id: User id.
+        :return: CommonResponseType object.
+        """
+
         def do(session: sqla_orm.Session) -> Optional[str]:
+            # 1. Check if group chat exists.
+            # 2. Check if user exists.
+            # 3. Check if user is a member of the chat.
+            # 4. Deletes user from the chat.
             res = None
             chat = session.query(orm.GroupChat).filter(orm.GroupChat.id == group_chat_id).first()
             if chat is not None:
@@ -206,6 +291,13 @@ class Server:
 
     @staticmethod
     def _response4common(res: CommonResponseType) -> aw.Response:
+        """
+        Converts CommonResponseType to aw.Response.
+
+        :param res: CommonResponseType object.
+        :return: aw.Response object
+        """
+
         return aw.json_response({
             "status": res[0],
             "data" if res[0] else "error": res[1]
@@ -213,6 +305,16 @@ class Server:
 
     @staticmethod
     async def _get_request_body(request: aw.Request, body_is_json: bool = True) -> Union[str, Mapping[str, Any]]:
+        """
+        Tries to get request body and convert it to JSON if necessary.
+
+        :param request: Received request.
+        :param body_is_json: Whether it's necessary to convert body to JSON.
+        :return: Body string or JSON mapping.
+        :raises:
+            aw.HTTPBadRequest: If there is no body or it's invalid.
+        """
+
         if not request.body_exists:
             raise aw.HTTPBadRequest(text="No body")
         body = await request.text()
@@ -413,6 +515,7 @@ class Server:
     async def start(self) -> bool:
         """
         Starts server.
+
         :return: True if server has been started,
                  False if it was started previously.
         """
@@ -434,6 +537,7 @@ class Server:
     async def stop(self) -> None:
         """
         Stops server if it was started.
+
         :return: None.
         """
         if self._started:
